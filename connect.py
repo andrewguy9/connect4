@@ -176,17 +176,68 @@ def make_random_player() -> PlayerTuple:
     return random_player_move, reset_random_player, "random"
 
 def make_random_ranked_player() -> PlayerTuple:
-    @torch.jit.script
+    # @torch.jit.script
     def reset_rand_ranked_player() -> Context:
         # Generate a random permutation of columns (0 to 6)
-        random_order = torch.randperm(7)
+        random_order = torch.zeros(0)
         return random_order
 
-    @torch.jit.script
-    def randomized_ranked_player_move(board: Board, policy: Context, player: PlayerId) -> Move:
-        return best_move(policy, board)
+    # @torch.jit.script
+    def rank_player_move(board: torch.Tensor, ctx: torch.Tensor, player: int = 1) -> int:
+        rows = board.size(0)
+        cols = board.size(1)
+        
+        # TODO i would think the priority would fix this.
+        # Create a priority tensor for each column; set full columns to -infinity.
+        pri = torch.full((cols,), float('-inf'))
+        
+        # Iterate over columns.
+        for col in range(cols):
+            # Assume board is a 2D tensor and column_height returns the landing row for a column.
+            r = column_height(board, col)
+            tokens = board[r+1:, col]  # Slice of tokens below the landing row
 
-    return randomized_ranked_player_move, reset_rand_ranked_player, "rank"
+            # Count our tokens (p)
+            is_player = (tokens == player).to(torch.int)
+            p = int(torch.sum(torch.cumprod(is_player, dim=0)).item())
+
+            # Count opponent tokens (o)
+            is_opponent = (tokens == -player).to(torch.int)
+            o = int(torch.sum(torch.cumprod(is_opponent, dim=0)).item())
+        
+            s = r + 1
+            moves_to_win = 4 - p
+            moves_to_lose = 4 - o
+            pri_win = 1/moves_to_win # 1, 0.5 0.33, 0.25
+            can_win = s >= moves_to_win
+            pri_block = 1/(moves_to_lose + .1) # 0.9 0.47 0.32 0.24
+            can_lose = s >= moves_to_lose
+            col_pri = pri_win if can_win else 0.0 + pri_block if can_lose else 0.0 + float('-inf') if s == 0 else 0.0
+            pri[col] = col_pri
+
+        # Find the maximum priority.
+        mask = (pri == pri.max())
+        filtered = torch.where(mask, pri, torch.tensor(float('-inf')))
+        probs = torch.softmax(filtered, dim=0)
+        chosen_idx = int(torch.multinomial(probs, 1).item())
+        return chosen_idx
+
+    return rank_player_move, reset_rand_ranked_player, "rank"
+
+@torch.jit.script
+def playerWinningMoves(board:Board, player: PlayerId) -> torch.Tensor:
+    cols = board.size(1)
+    mask = torch.zeros(cols)
+    for col in range(cols):
+        if board[0, col] == 0:
+            board_after = make_move(board, col, player)
+            if check_win(board_after, player):
+                mask[col]=1
+    return mask
+
+@torch.jit.script
+def OpponentHasWinningMove(board: Board, player: PlayerId) -> torch.Tensor:
+    return playerWinningMoves(board, -player)
 
 def make_greedy_player():
     @torch.jit.script
@@ -385,79 +436,99 @@ def train_self_play(net: Connect4Net, optimizer: torch.optim.Optimizer, num_game
     p1_wins = 0
     p2_wins = 0
     stalemates = 0
-    with tqdm(total=num_games, desc="Self play", leave=False) as pbar:
-        for game in range(num_games):
-            board = torch.zeros((6, 7), dtype=torch.int8)
-            current_player = 1  # We'll have the network play both sides.
+
+    total_loss = 0.0
+    epoch_loss = torch.tensor(0.0, requires_grad=True)
+    missed_win = 0
+    missed_block = 0
+    for game in (pbar:=tqdm(range(num_games), desc="Self play", leave=False)):
+        board = torch.zeros((6, 7), dtype=torch.int8)
+        current_player = 1  # We'll have the network play both sides.
+        
+        # These lists will store the trajectory of the game.
+        log_probs: List[torch.Tensor] = []
+        players: List[int] = []
+        
+        done = False
+        while not done:
+            # Check for a possible win
+            possible_wins = playerWinningMoves(board, current_player)
+            # check for a possible loss
+            possible_losses = OpponentHasWinningMove(board, current_player)
+
+            # Get the move from the player
+            action, log_prob = net.net_infer_log_prob(board, current_player)
             
-            # These lists will store the trajectory of the game.
-            log_probs: List[torch.Tensor] = []
-            players: List[int] = []
+            # Check if the move is a winning move, and if we missed it.
+            if possible_wins[action] == 0 and sum(possible_wins) > 0:
+                missed_win += 1
+            elif possible_losses[action] == 0 and sum(possible_losses) > 0:
+                missed_block += 1
+
+            # Record the log probability and the current player.
+            log_probs.append(log_prob)
+            players.append(current_player)
             
-            done = False
-            while not done:
-                action, log_prob = net.net_infer_log_prob(board, current_player)
-                
-                # Record the log probability and the current player.
-                log_probs.append(log_prob)
-                players.append(current_player)
-                
-                # Make the move.
-                board = make_move(board, action, current_player)
-                
-                # Check for terminal conditions.
-                if check_win(board, current_player):
-                    # Current player won.
-                    final_reward = 1.0
-                    done = True
-                    if current_player == 1:
-                        p1_wins += 1
-                    else:
-                        p2_wins += 1
-                elif is_stalemate(board):
-                    final_reward =  0.0
-                    done = True
-                    stalemates += 1
+            # Make the move.
+            board = make_move(board, action, current_player)
+            
+            # Check for terminal conditions.
+            if check_win(board, current_player):
+                # Current player won.
+                final_reward = 1.0
+                done = True
+                if current_player == 1:
+                    p1_wins += 1
                 else:
-                    # No outcome yet; switch player.
-                    current_player = -current_player
-            
-            # Once the game is finished, assign rewards to each move.
-            # For every move, if the move was made by the winner, reward=+1;
-            # if by the loser, reward=-1; if stalemate, reward=-0.1.
-            # Note: When the game is finished with a win, current_player still holds the value of the winning player.
-            returns: List[float] = []
-            for p in players:
-                if final_reward == 0.0:
-                    returns.append(-0.1) # If stalemate, reward is -0.1.
-                else:
-                    # From each move's perspective, reward is +1 if that player equals the winner,
-                    # otherwise -1.
-                    returns.append(1.0 if p == current_player else -1.0)
-            
-            # Compute the policy loss.
-            scale = 10000 # TODO maybe remove
-            loss: torch.Tensor = torch.tensor([0.0])
-            base_discount = 0.98
-            discount = 1.0
-            assert(len(log_probs) == len(returns))
-            # TODO dont need to reverse if use the trick.
-            for log_prob, r in zip(reversed(log_probs), reversed(returns)):
-                loss -= log_prob * scale * r * discount  # maximize log_prob for winning moves
-                discount *= base_discount
-            # print("loss", loss, "winner", current_player, "had winner", final_reward)
-            
-            # Update the network.
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            if (game + 1) % 100 == 0:
-                pbar.update(100)
-                pbar.set_postfix({
-                    "loss": loss.item(),
-                    "scores:": f"{p1_wins}/{p2_wins}/{stalemates}"
-                })
+                    p2_wins += 1
+            elif is_stalemate(board):
+                final_reward =  0.0
+                done = True
+                stalemates += 1
+            else:
+                # No outcome yet; switch player.
+                current_player = -current_player
+        
+        # Once the game is finished, assign rewards to each move.
+        # For every move, if the move was made by the winner, reward=+1;
+        # if by the loser, reward=-1; if stalemate, reward=-0.1.
+        # Note: When the game is finished with a win, current_player still holds the value of the winning player.
+        returns: List[float] = []
+        for p in players:
+            if final_reward == 0.0:
+                returns.append(-0.1) # If stalemate, reward is -0.1.
+            else:
+                # From each move's perspective, reward is +1 if that player equals the winner,
+                # otherwise -1.
+                returns.append(1.0 if p == current_player else -1.0)
+        
+        # Compute the policy loss.
+        T = len(log_probs)
+        if T > 0:
+            game_loss = torch.tensor(0.0)
+            for i, log_prob in enumerate(log_probs):
+                weight = 0.9 ** (T - 1 - i)
+                game_loss = game_loss - log_prob * returns[i] * weight
+            epoch_loss = epoch_loss + game_loss
+            total_loss += game_loss.item()
+        else:
+            game_loss = torch.tensor(0.0)
+
+        pbar.set_postfix({
+            "loss": f"{game_loss.item():.4f}" if T > 0 else "N/A",
+            "scores:": f"{p1_wins}/{p2_wins}/{stalemates}",
+            "missed_win": f"{missed_win}",
+            "missed_block": f"{missed_block}",
+        })
+        # Update the network.
+    optimizer.zero_grad()
+    epoch_loss.backward()
+    optimizer.step()
+
+    avg_loss_str = f"{total_loss/num_games:.4f}"
+    pbar.write(f"Average loss per game: {avg_loss_str} {p1_wins}/{p2_wins}/{stalemates} Missed Wins {missed_win} Missed Blocks {missed_block}")
+
+        
 
 
 def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: PlayerTuple, num_games: int = 1000):
@@ -468,64 +539,72 @@ def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: 
     p2_move, p2_reset, p2_name = player
     net.train()
     net_wins = 0
-    with tqdm(total=num_games, desc=f"net vs {p2_name}", leave=False) as pbar:
-        for game in range(num_games):
-            board: Board = torch.zeros((6, 7), dtype=torch.int8)
-            current_player: PlayerId = 1  # Neural network is always Player 1.
-            
-            log_probs: List[torch.Tensor] = []
-            done = False
+    total_loss = 0.0
+    epoch_loss = torch.tensor(0.0, requires_grad=True)
 
-            p2_ctx = p2_reset()
-            while not done:
-                if current_player == 1:
-                    action, log_prob = net.net_infer_log_prob(board, current_player)
-                    log_probs.append(log_prob)
-                    board = make_move(board, action, current_player)
-                else:
-                    # Algoritm player move
-                    move = p2_move(board, p2_ctx, current_player)
-                    board = make_move(board, move, current_player)
-                
-                # Check terminal conditions.
-                if check_win(board, current_player):
-                    winner = current_player
-                    done = True
-                elif is_stalemate(board):
-                    winner = 0
-                    done = True
-                else:
-                    # Switch only if game is not over.
-                    current_player = -current_player
-            
-            # Determine reward for neural network's moves.
-            # For a win, reward +1; for a loss, -1; draw gives 0.
-            if winner == 1:
-                reward = 1.0
-                net_wins += 1
-            elif winner == -1:
-                reward = -1.0
+    for game in (pbar:=tqdm(range(num_games), desc=f"net vs {p2_name}", leave=False)):
+        board: Board = torch.zeros((6, 7), dtype=torch.int8)
+        current_player: PlayerId = 1  # Neural network is always Player 1.
+        
+        log_probs: List[torch.Tensor] = []
+        done = False
+
+        p2_ctx = p2_reset()
+        while not done:
+            if current_player == 1:
+                action, log_prob = net.net_infer_log_prob(board, current_player)
+                log_probs.append(log_prob)
+                board = make_move(board, action, current_player)
             else:
-                reward = -0.1
+                # Algoritm player move
+                move = p2_move(board, p2_ctx, current_player)
+                board = make_move(board, move, current_player)
             
-            scale = 200
-            loss: torch.Tensor = torch.Tensor([0.0])
-            discount = 1.0
-            discount_rate = 0.9
-            for log_prob in reversed(log_probs):
-                loss -= log_prob * scale * reward * discount
-                discount *= discount_rate
-            
-            optimizer.zero_grad()
-            loss.backward() 
-            optimizer.step()
-            
-            if (game + 1) % 100 == 0:
-                pbar.update(100)
-                pbar.set_postfix({
-                    "loss": loss.item(),
-                    "Win%": f"{net_wins/(game+1):3.0%}",
-                })
+            # Check terminal conditions.
+            if check_win(board, current_player):
+                winner = current_player
+                done = True
+            elif is_stalemate(board):
+                winner = 0
+                done = True
+            else:
+                # Switch only if game is not over.
+                current_player = -current_player
+        
+        # Determine reward for neural network's moves.
+        # For a win, reward +1; for a loss, -1; draw gives 0.
+        if winner == 1:
+            reward = 1.0
+            net_wins += 1
+        elif winner == -1:
+            reward = -1.0
+        else:
+            reward = -0.1
+        
+        loss: torch.Tensor = torch.Tensor([0.0])
+        discount_rate = 0.9
+        T = len(log_probs)
+        if T > 0:
+            game_loss = torch.tensor(0.0)
+            for i, log_prob in enumerate(log_probs):
+                loss -= log_prob * reward
+                weight = discount_rate ** (T - 1 - i)
+                game_loss = game_loss + weight * loss
+                total_loss += game_loss.item()
+        else:
+            game_loss = torch.tensor(0.0)
+        
+        pbar.set_postfix({
+            "loss": f"{game_loss.item():.4f}" if T > 0 else "N/A",
+            "Win%": f"{net_wins/(game+1):3.0%}",
+        })
+    optimizer.zero_grad()
+    loss.backward() 
+    optimizer.step()
+
+    avg_loss_str = f"{total_loss/num_games:.4f}"
+    wins_str = f"{net_wins/num_games:.2%}"
+    pbar.write(f"Average loss per game: {avg_loss_str} Overall winrate vs {p2_name}: {wins_str}")
 
 def train_supervised_vs_functions(net: Connect4Net, 
                                   optimizer: torch.optim.Optimizer, 
@@ -563,65 +642,62 @@ def train_supervised_vs_functions(net: Connect4Net,
 
     epoch_loss = torch.tensor(0.0, requires_grad=True)
 
+    for game in (pbar:=tqdm(range(num_games), desc=f"Supervised Training: Trainer:{t_name} vs Opponent:{o_name}", leave=False)):
+        # Initialize an empty board (6 rows x 7 columns) with the network as Player 1.
+        board = torch.zeros((6, 7), dtype=torch.int8)
+        current_player:PlayerId = 1
 
-    with tqdm(total=num_games, desc=f"Supervised Training: Trainer:{t_name} vs Opponent:{o_name}", leave=False) as pbar:
-        for game in range(num_games):
-            # Initialize an empty board (6 rows x 7 columns) with the network as Player 1.
-            board = torch.zeros((6, 7), dtype=torch.int8)
-            current_player:PlayerId = 1
+        t_ctx = t_reset()
+        o_ctx = o_reset()
 
-            t_ctx = t_reset()
-            o_ctx = o_reset()
+        move_losses: List[torch.Tensor] = []
+        while True:
+            if current_player == 1:
+                # Get the trainer's move.
+                trainer_action = t_move(board, t_ctx, current_player)
+                # TODO XXX
+                net_action_tensor, selected_prob, dist, masked_logits = net.net_infer_logits(board, current_player)
+                net_action = int(net_action_tensor)
 
-            move_losses: List[torch.Tensor] = []
-            while True:
-                if current_player == 1:
-                    # Get the trainer's move.
-                    trainer_action = t_move(board, t_ctx, current_player)
-                    # TODO XXX
-                    net_action_tensor, selected_prob, dist, masked_logits = net.net_infer_logits(board, current_player)
-                    net_action = int(net_action_tensor)
+                if net_action == trainer_action:
+                    correct_moves += 1
+                total_moves += 1
 
-                    if net_action == trainer_action:
-                        correct_moves += 1
-                    total_moves += 1
+                # Compute the cross entropy loss using the trainer's action as target.
+                loss = F.cross_entropy(masked_logits.unsqueeze(0), torch.tensor([trainer_action]))
 
-                    # Compute the cross entropy loss using the trainer's action as target.
-                    loss = F.cross_entropy(masked_logits.unsqueeze(0), torch.tensor([trainer_action]))
-
-                    move_losses.append(loss)
-                    
-                    # Update the board using the trainer's move.
-                    board = make_move(board, trainer_action, current_player)
-                else:
-                    opponent_action = o_move(board, o_ctx, current_player)
-                    board = make_move(board, opponent_action, current_player)
+                move_losses.append(loss)
                 
-                # Check for terminal conditions.
-                if check_win(board, current_player) or is_stalemate(board):
-                    break
-                else:
-                    # Switch the current player.
-                    current_player = -current_player
-
-            # Discount the losses. We want the final moves to count more, so
-            # we use a factor discount_rate**(T-1-i) for move index i (with T total moves).
-            T = len(move_losses)
-            if T > 0:
-                game_loss = torch.tensor(0.0)
-                for i, loss in enumerate(move_losses):
-                    weight = discount_rate ** (T - 1 - i)
-                    game_loss = game_loss + weight * loss
-                epoch_loss = epoch_loss + game_loss
-                total_loss += game_loss.item()
+                # Update the board using the trainer's move.
+                board = make_move(board, trainer_action, current_player)
             else:
-                game_loss = torch.tensor(0.0)
+                opponent_action = o_move(board, o_ctx, current_player)
+                board = make_move(board, opponent_action, current_player)
+            
+            # Check for terminal conditions.
+            if check_win(board, current_player) or is_stalemate(board):
+                break
+            else:
+                # Switch the current player.
+                current_player = -current_player
 
-            pbar.update(1)
-            pbar.set_postfix({
-                "loss": f"{game_loss.item():.4f}" if T > 0 else "N/A",
-                "accuracy": f"{(correct_moves/total_moves):.2%}" if total_moves > 0 else "N/A"
-            })
+        # Discount the losses. We want the final moves to count more, so
+        # we use a factor discount_rate**(T-1-i) for move index i (with T total moves).
+        T = len(move_losses)
+        if T > 0:
+            game_loss = torch.tensor(0.0)
+            for i, loss in enumerate(move_losses):
+                weight = discount_rate ** (T - 1 - i)
+                game_loss = game_loss + weight * loss
+            epoch_loss = epoch_loss + game_loss
+            total_loss += game_loss.item()
+        else:
+            game_loss = torch.tensor(0.0)
+
+        pbar.set_postfix({
+            "loss": f"{game_loss.item():.4f}" if T > 0 else "N/A",
+            "accuracy": f"{(correct_moves/total_moves):.2%}" if total_moves > 0 else "N/A"
+        })
 
     # Update the network once after all games have been evaluated.
     optimizer.zero_grad()
@@ -630,7 +706,7 @@ def train_supervised_vs_functions(net: Connect4Net,
 
     avg_loss_str = f"{total_loss/num_games:.4f}"
     mv_acc_str = f"{(correct_moves/max(total_moves, 1)):.2%}"
-    pbar.write(f"Average loss per game: {avg_loss_str} Overall move accuracy: {mv_acc_str}")
+    pbar.write(f"Average loss per game: {t_name} vs {o_name} : {avg_loss_str} Overall move accuracy: {mv_acc_str}")
 
 def evaluate_player_vs_player(player1: PlayerTuple, player2: PlayerTuple, num_games: int = 1000) -> Tuple[int, int, int]:
     """
@@ -675,16 +751,17 @@ def evaluation_main() -> None:
 
     n_eval = 1000
     epochs_supervised = 200
-    epochs_reinforcement=1000
-    n_train_rnd = 100
-    n_train_self = 100
+    epochs_reinforcement=500
+    n_train_supervised = 1000
+    n_train_reinforce = 100
+    n_train_self = 1000
 
     net_player = make_net_player(net)
 
-    faceoffs = True
+    faceoffs = False
     supervised = True
-    reinforcement = True
-    selfplay = True
+    reinforcement = False
+    selfplay = False
 
     r_player = make_random_player()
     rr_player = make_random_ranked_player()
@@ -708,34 +785,20 @@ def evaluation_main() -> None:
 
     # SUPERVISED TRAINING
     if supervised:
-        for epoch in (pbar:=tqdm(range(epochs_supervised), desc="Supervised")):
-            # TODO in train function, we can take a list of opponents or move evaluation out to here like reinforcement.
-            train_supervised_vs_functions(net, optimizer, greed_player, r_player, num_games=n_train_rnd)
-            #train_supervised_vs_functions(net, optimizer, greed_player, rr_player, num_games=n_train_rnd)
-            #train_supervised_vs_functions(net, optimizer, greed_player, greed_player, num_games=n_train_rnd)
-            # TODO we are not saving intermediate outputs.
+        for opponent in tqdm([r_player, rr_player, greed_player], desc="PvP"):
+            for epoch in (pbar:=tqdm(range(epochs_supervised), desc="Supervised", leave=False)):
+                train_supervised_vs_functions(net, optimizer, greed_player, opponent, num_games=n_train_supervised)
 
     # REINFORCEMENT TRAINING
     if reinforcement:
-        for epoch in (pbar:=tqdm(range(epochs_reinforcement), desc="Reinforcement")):
-            train_vs_player(net, optimizer, r_player, num_games=n_train_rnd)
-            train_vs_player(net, optimizer, rr_player, num_games=n_train_rnd)
-            train_vs_player(net, optimizer, greed_player, num_games=n_train_rnd)
+        for opponent in tqdm([r_player, rr_player, greed_player], desc="PvP"):
+            for epoch in (pbar:=tqdm(range(epochs_reinforcement), desc="Reinforcement")):
+                train_vs_player(net, optimizer, opponent, num_games=n_train_reinforce)
 
-            if epoch % 10 == 0:
-                pbar.write(f"--- Epoch {epoch} ---")
-                pbar.write("EVALUATING NET VS ALGO PLAYERS:")
-                p1_wins, p2_wins, draws = evaluate_player_vs_player(net_player, r_player, num_games=n_eval)
-                pbar.write(f"random: {p1_wins}/{p2_wins}/{draws} = {100*p1_wins/n_eval:3.0f}%")
-
-                p1_wins, p2_wins, draws = evaluate_player_vs_player(net_player, rr_player, num_games=n_eval)
-                pbar.write(f"ranked: {p1_wins}/{p2_wins}/{draws} = {100*p1_wins/n_eval:3.0f}%")
-                
-                p1_wins, p2_wins, draws = evaluate_player_vs_player(net_player, greed_player, num_games=n_eval)
-                pbar.write(f"greedy: {p1_wins}/{p2_wins}/{draws} = {100*p1_wins/n_eval:3.0f}%")
-
-                torch.save(net.state_dict(), f"connect4_net_{epoch}.pth")
-            # pbar.set_postfix({})
+                if epoch % (epochs_reinforcement/20) == 0:
+                    p1_wins, p2_wins, draws = evaluate_player_vs_player(net_player, r_player, num_games=n_eval)
+                    pbar.write(
+                        f"EVALUATING NET VS {opponent[2]}:f{epoch} : {p1_wins}/{p2_wins}/{draws} = {100*p1_wins/n_eval:3.0f}%")
     if selfplay:
         for epoch in (pbar:=tqdm(range(epochs_reinforcement), desc="Selfplay")):
             train_self_play(net, optimizer, num_games=n_train_self)
