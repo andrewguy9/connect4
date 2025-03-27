@@ -589,7 +589,7 @@ def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: 
         else:
             reward = -0.1
         
-        loss: torch.Tensor = torch.Tensor([0.0])
+        loss: torch.Tensor = torch.Tensor([0.0]).to(device)
         discount_rate = 0.9
         T = len(log_probs)
         if T > 0:
