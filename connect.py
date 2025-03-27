@@ -27,10 +27,10 @@ def check_win(board: Board, player: PlayerId) -> bool:
     b = b.unsqueeze(0).unsqueeze(0)
 
     # Define convolution kernels for horizontal, vertical and two diagonal directions.
-    kernel_h = torch.tensor([[[[1.0, 1.0, 1.0, 1.0]]]])
-    kernel_v = torch.tensor([[[[1.0], [1.0], [1.0], [1.0]]]])
-    kernel_d1 = torch.eye(4, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-    kernel_d2 = torch.flip(kernel_d1, dims=[-1])
+    kernel_h = torch.tensor([[[[1.0, 1.0, 1.0, 1.0]]]]).to(board.device)
+    kernel_v = torch.tensor([[[[1.0], [1.0], [1.0], [1.0]]]]).to(board.device)
+    kernel_d1 = torch.eye(4, dtype=torch.float32).to(board.device).unsqueeze(0).unsqueeze(0)
+    kernel_d2 = torch.flip(kernel_d1, dims=[-1]).to(board.device)
 
     # Apply convolutions; the output dimensions will be reduced accordingly.
     conv_h = F.conv2d(b, kernel_h, stride=1)
