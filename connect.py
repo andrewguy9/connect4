@@ -441,7 +441,7 @@ def train_self_play(net: Connect4Net, optimizer: torch.optim.Optimizer, num_game
     epoch_loss = torch.tensor(0.0, requires_grad=True)
     missed_win = 0
     missed_block = 0
-    for game in (pbar:=tqdm(range(num_games), desc="Self play", leave=False)):
+    for game in (pbar:=tqdm(range(num_games), desc="Self play", leave=False, mininterval=1.0)):
         board = torch.zeros((6, 7), dtype=torch.int8)
         current_player = 1  # We'll have the network play both sides.
         
@@ -542,7 +542,7 @@ def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: 
     total_loss = 0.0
     epoch_loss = torch.tensor(0.0, requires_grad=True)
 
-    for game in (pbar:=tqdm(range(num_games), desc=f"net vs {p2_name}", leave=False)):
+    for game in (pbar:=tqdm(range(num_games), desc=f"net vs {p2_name}", leave=False, min_interval=1.0)):
         board: Board = torch.zeros((6, 7), dtype=torch.int8)
         current_player: PlayerId = 1  # Neural network is always Player 1.
         
@@ -642,7 +642,7 @@ def train_supervised_vs_functions(net: Connect4Net,
 
     epoch_loss = torch.tensor(0.0, requires_grad=True)
 
-    for game in (pbar:=tqdm(range(num_games), desc=f"Supervised Training: Trainer:{t_name} vs Opponent:{o_name}", leave=False)):
+    for game in (pbar:=tqdm(range(num_games), desc=f"Supervised Training: Trainer:{t_name} vs Opponent:{o_name}", leave=False, mininterval=1.0)):
         # Initialize an empty board (6 rows x 7 columns) with the network as Player 1.
         board = torch.zeros((6, 7), dtype=torch.int8)
         current_player:PlayerId = 1
@@ -750,7 +750,7 @@ def evaluation_main() -> None:
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
 
     n_eval = 1000
-    epochs_supervised = 200
+    epochs_supervised = 2#00
     epochs_reinforcement=500
     n_train_supervised = 1000
     n_train_reinforce = 100
