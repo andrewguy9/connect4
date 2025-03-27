@@ -233,7 +233,7 @@ def make_random_ranked_player() -> PlayerTuple:
 @torch.jit.script
 def playerWinningMoves(board:Board, player: PlayerId) -> torch.Tensor:
     cols = board.size(1)
-    mask = torch.zeros(cols) # TODO to device?
+    mask = torch.zeros(cols, device=board.device)
     for col in range(cols):
         if board[0, col] == 0:
             board_after = make_move(board, col, player)
