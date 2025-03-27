@@ -704,10 +704,12 @@ def train_supervised_vs_functions(net: Connect4Net,
         else:
             game_loss = torch.tensor(0.0)
 
+        """
         pbar.set_postfix({
             "loss": f"{game_loss.item():.4f}" if T > 0 else "N/A",
             "accuracy": f"{(correct_moves/total_moves):.2%}" if total_moves > 0 else "N/A"
         })
+        """
 
     # Update the network once after all games have been evaluated.
     optimizer.zero_grad()
