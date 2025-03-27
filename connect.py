@@ -4,6 +4,12 @@ import torch.nn.functional as F
 import torch.nn as nn
 from tqdm import tqdm
 
+##########
+# Device #
+##########
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 #########
 # BOARD #
 #########
@@ -376,7 +382,6 @@ def faceoff_loop(p1: PlayerTuple, p2: PlayerTuple) -> None:
     # Initialize an empty board (6 rows x 7 columns) with dtype int8.
     board = torch.zeros((6, 7), dtype=torch.int8)
     # Create the neural network (Player 1). It is untrained.
-    net = Connect4Net()
     
     p1_move, p1_reset, p1_name = p1
     p1_ctx = p1_reset()
@@ -747,6 +752,7 @@ def evaluate_player_vs_player(player1: PlayerTuple, player2: PlayerTuple, num_ga
 
 def evaluation_main() -> None:
     net = Connect4Net()
+    net.to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
 
     n_eval = 1000
@@ -825,6 +831,7 @@ def evaluation_main() -> None:
         faceoff_loop(net_player, net_player)
 
         untrained_net = Connect4Net()
+        untrained_net.to(device)
         untrained_net_player = make_net_player(untrained_net)
         print("Demo: Neural Network vs Untrained Neural Network")
         faceoff_loop(net_player, untrained_net_player)
