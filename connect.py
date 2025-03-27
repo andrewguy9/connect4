@@ -673,7 +673,8 @@ def train_supervised_vs_functions(net: Connect4Net,
                 total_moves += 1
 
                 # Compute the cross entropy loss using the trainer's action as target.
-                loss = F.cross_entropy(masked_logits.unsqueeze(0), torch.tensor([trainer_action]))
+                action_tensor = torch.Tensor([trainer_action]).to(device)
+                loss = F.cross_entropy(masked_logits.unsqueeze(0), action_tensor)
 
                 move_losses.append(loss)
                 
