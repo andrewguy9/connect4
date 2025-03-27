@@ -170,12 +170,12 @@ PlayerFn = Callable[[], PlayerTuple]
 def make_random_player() -> PlayerTuple:
     @torch.jit.script
     def reset_random_player():
-        return torch.zeros(0)
+        return torch.zeros(0) # TODO device noop
     
     @torch.jit.script
     def random_player_move(board: Board, ctx: Context, player: int = 1) -> Move:
         # Create a random policy vector of size (7,) with values in [0, 1).
-        policy = torch.rand((7,))
+        policy = torch.rand((7,)).to(board.device)
         col = best_move(policy, board)
         return col
 
@@ -185,7 +185,7 @@ def make_random_ranked_player() -> PlayerTuple:
     # @torch.jit.script
     def reset_rand_ranked_player() -> Context:
         # Generate a random permutation of columns (0 to 6)
-        random_order = torch.zeros(0)
+        random_order = torch.zeros(0) # TODO device noop
         return random_order
 
     # @torch.jit.script
@@ -233,7 +233,7 @@ def make_random_ranked_player() -> PlayerTuple:
 @torch.jit.script
 def playerWinningMoves(board:Board, player: PlayerId) -> torch.Tensor:
     cols = board.size(1)
-    mask = torch.zeros(cols)
+    mask = torch.zeros(cols) # TODO to device?
     for col in range(cols):
         if board[0, col] == 0:
             board_after = make_move(board, col, player)
@@ -249,7 +249,7 @@ def make_greedy_player():
     @torch.jit.script
     def reset_greedy_player() -> torch.Tensor:
         # This player does not need per-game context, so we return an empty tensor.
-        return torch.zeros(0)
+        return torch.zeros(0) # TODO device noop
     
     @torch.jit.script
     def greedy_player_move(board: torch.Tensor, ctx: torch.Tensor, player: int = 1) -> Move:
@@ -379,8 +379,9 @@ def make_net_player(net: Connect4Net) -> PlayerTuple:
 ##########
 
 def faceoff_loop(p1: PlayerTuple, p2: PlayerTuple) -> None:
+    global device
     # Initialize an empty board (6 rows x 7 columns) with dtype int8.
-    board = torch.zeros((6, 7), dtype=torch.int8)
+    board = torch.zeros((6, 7), dtype=torch.int8).to(device)
     # Create the neural network (Player 1). It is untrained.
     
     p1_move, p1_reset, p1_name = p1
@@ -437,6 +438,7 @@ def train_self_play(net: Connect4Net, optimizer: torch.optim.Optimizer, num_game
        0 if the game was a stalemate.
     Then we update the network using the REINFORCE policy gradient loss.
     """
+    global device
     net.train()
     p1_wins = 0
     p2_wins = 0
@@ -447,7 +449,7 @@ def train_self_play(net: Connect4Net, optimizer: torch.optim.Optimizer, num_game
     missed_win = 0
     missed_block = 0
     for game in (pbar:=tqdm(range(num_games), desc="Self play", leave=False, mininterval=1.0)):
-        board = torch.zeros((6, 7), dtype=torch.int8)
+        board = torch.zeros((6, 7), dtype=torch.int8).to(device)
         current_player = 1  # We'll have the network play both sides.
         
         # These lists will store the trajectory of the game.
@@ -541,6 +543,7 @@ def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: 
     Here we let the network play as Player 1 against a random opponent (Player 2).
     Only the moves from the neural network player are used for the policy update.
     """
+    global device
     p2_move, p2_reset, p2_name = player
     net.train()
     net_wins = 0
@@ -548,7 +551,7 @@ def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: 
     epoch_loss = torch.tensor(0.0, requires_grad=True)
 
     for game in (pbar:=tqdm(range(num_games), desc=f"net vs {p2_name}", leave=False, min_interval=1.0)):
-        board: Board = torch.zeros((6, 7), dtype=torch.int8)
+        board: Board = torch.zeros((6, 7), dtype=torch.int8).to(device)
         current_player: PlayerId = 1  # Neural network is always Player 1.
         
         log_probs: List[torch.Tensor] = []
@@ -637,6 +640,7 @@ def train_supervised_vs_functions(net: Connect4Net,
     The loss for each move is stored, and after the game the losses are combined with a discount rate,
     then the network is updated only once after the epoch (all games) is evaluated.
     """
+    global device #TODO use net?
     net.train()
     total_loss = 0.0
     correct_moves = 0
@@ -649,7 +653,7 @@ def train_supervised_vs_functions(net: Connect4Net,
 
     for game in (pbar:=tqdm(range(num_games), desc=f"Supervised Training: Trainer:{t_name} vs Opponent:{o_name}", leave=False, mininterval=1.0)):
         # Initialize an empty board (6 rows x 7 columns) with the network as Player 1.
-        board = torch.zeros((6, 7), dtype=torch.int8)
+        board = torch.zeros((6, 7), dtype=torch.int8).to(device)
         current_player:PlayerId = 1
 
         t_ctx = t_reset()
@@ -727,7 +731,7 @@ def evaluate_player_vs_player(player1: PlayerTuple, player2: PlayerTuple, num_ga
         for _ in range(num_games):
             p1_ctx = p1_reset()
             p2_ctx = p2_reset()
-            board = torch.zeros((6, 7), dtype=torch.int8)
+            board = torch.zeros((6, 7), dtype=torch.int8).to(device)
             current_player: PlayerId = 1
             while True:
                 if is_stalemate(board):
