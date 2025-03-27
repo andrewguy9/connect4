@@ -673,11 +673,11 @@ def evaluation_main() -> None:
     net = Connect4Net()
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
 
-    n_eval = 10#00
-    epochs_supervised = 2#00
-    epochs_reinforcement=10#00
-    n_train_rnd = 10#0
-    n_train_self = 10#0
+    n_eval = 1000
+    epochs_supervised = 200
+    epochs_reinforcement=1000
+    n_train_rnd = 100
+    n_train_self = 100
 
     net_player = make_net_player(net)
 
