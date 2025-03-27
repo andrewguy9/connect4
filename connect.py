@@ -550,7 +550,7 @@ def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: 
     total_loss = 0.0
     epoch_loss = torch.tensor(0.0, requires_grad=True)
 
-    for game in (pbar:=tqdm(range(num_games), desc=f"net vs {p2_name}", leave=False, min_interval=1.0)):
+    for game in (pbar:=tqdm(range(num_games), desc=f"net vs {p2_name}", leave=False, mininterval=1.0)):
         board: Board = torch.zeros((6, 7), dtype=torch.int8).to(device)
         current_player: PlayerId = 1  # Neural network is always Player 1.
         
