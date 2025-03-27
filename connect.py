@@ -762,12 +762,12 @@ def evaluation_main() -> None:
     net.to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
 
-    n_eval = 10#00
-    epochs_supervised = 2#00
-    epochs_reinforcement=5#00
-    n_train_supervised = 10#00
-    n_train_reinforce = 10#0
-    n_train_self = 10#00
+    n_eval = 1000
+    epochs_supervised = 200
+    epochs_reinforcement=500
+    n_train_supervised = 1000
+    n_train_reinforce = 100
+    n_train_self = 1000
 
     net_player = make_net_player(net)
 
