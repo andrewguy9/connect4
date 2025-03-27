@@ -2,7 +2,6 @@ from typing import Callable, List, Literal, Tuple
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-from torch.distributions import Categorical
 from tqdm import tqdm
 
 #########
@@ -258,66 +257,63 @@ class Connect4Net(nn.Module):
         policy_logits = self.fc_policy(x)
         return policy_logits
 
+    @torch.jit.export
+    def board_to_nnet_input(self, board: Board, current_player: PlayerId) -> torch.Tensor:
+        # Create a binary mask for current player's pieces.
+        current_channel = (board == current_player).to(torch.float32)
+        # Create a binary mask for opponent's pieces.
+        opponent_channel = (board == -current_player).to(torch.float32)
+        # Stack the two channels to create a (2, 6, 7) tensor.
+        return torch.stack([current_channel, opponent_channel], dim=0)
+
+    @torch.jit.export
+    def net_infer_logits(self, board: Board, player: PlayerId)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns the action as a tensor, the selected action probability as a tensor, the log probability distrubtion (as a tensor) and the logits masked by valid moves.
+        Useful for supervised learning.
+        """
+        state_input = self.board_to_nnet_input(board, player).unsqueeze(0)  # shape (1,2,6,7)
+        logits = self(state_input)[0]  # shape (7,)
+        
+        # Mask invalid moves by setting them to -infinity so they have zero probability.
+        valid = valid_move_mask(board)
+        masked_logits = logits.clone()
+        masked_logits[~valid] = float('-inf')
+        probs = F.softmax(masked_logits, dim=0)
+        action = torch.multinomial(probs, num_samples=1)
+        log_probs = F.log_softmax(masked_logits, dim=0)
+        selected_log_prob = log_probs[action]
+
+        return action, selected_log_prob, log_probs, masked_logits
+
+    @torch.jit.export
+    def net_infer_log_prob(self, board: Board, player: PlayerId)->Tuple[torch.Tensor, torch.Tensor]:
+        """
+        returns the move as a tensor, and log_prob for the selected move.
+        Useful for reinforcement learning.
+        """
+        action_tensor, selected_prob, log_prob, masked_logits = self.net_infer_logits(board, player)
+        return action_tensor, selected_prob
+
+    @torch.jit.export
+    def net_infer_move(self, board: Board, player: PlayerId) -> Move:
+        """
+        Evaluation function for the net. Returns integer move decision.
+        """
+        action_tensor, _ = self.net_infer_log_prob(board, player)
+        return int(action_tensor)
+
 # TODO use?
 scripted_net = torch.jit.script(Connect4Net())
 
-@torch.jit.script
-def board_to_nnet_input(board: Board, current_player: PlayerId) -> torch.Tensor:
-    # Create a binary mask for current player's pieces.
-    current_channel = (board == current_player).to(torch.float32)
-    # Create a binary mask for opponent's pieces.
-    opponent_channel = (board == -current_player).to(torch.float32)
-    # Stack the two channels to create a (2, 6, 7) tensor.
-    return torch.stack([current_channel, opponent_channel], dim=0)
-
-# TODO this should be only infer function for net. XXX
-
-@torch.jit.script
-def net_infer_logits(net: nn.Module, board: Board, player: PlayerId)->Tuple[torch.Tensor, Categorical, torch.Tensor]:
-    """
-    Returns the action as a tensor, the categorical distribution and the logits masked by valid moves.
-    Useful for supervised learning.
-    """
-    state_input = board_to_nnet_input(board, player).unsqueeze(0)  # shape (1,2,6,7)
-    logits = net(state_input)[0]  # shape (7,)
-    
-    # Mask invalid moves by setting them to -infinity so they have zero probability.
-    valid = valid_move_mask(board)
-    masked_logits = logits.clone()
-    masked_logits[~valid] = float('-inf')
-    probs = F.softmax(masked_logits, dim=0)
-    # Create a categorical distribution and sample an action.
-    dist = Categorical(probs)
-    action = dist.sample()
-    return action, dist, masked_logits
-
-@torch.jit.script
-def net_infer_log_prob(net: nn.Module, board: Board, player: PlayerId)->Tuple[torch.Tensor, torch.Tensor]:
-    """
-    returns the move as a tensor, and log_prob for the selected move.
-    Useful for reinforcement learning.
-    """
-    action_tensor, dist, masked_logits = net_infer_logits(net, board, player)
-    log_prob = dist.log_prob(action_tensor)
-    return action_tensor, log_prob
-
-@torch.jit.script
-def net_infer_move(net: nn.Module, board: Board, player: PlayerId) -> Move:
-    """
-    Evaluation function for the net. Returns integer move decision.
-    """
-    action_tensor, _ = net_infer_log_prob(net, board, player)
-    return int(action_tensor)
-
 # TODO i bet this will not be passable into script, because it relies on a shared scope.
-def make_net_player(net: nn.Module) -> PlayerTuple:
-    @torch.jit.script
-    def net_reset():
-        return torch.zeros(0)
+def make_net_player(net: Connect4Net) -> PlayerTuple:
+
+    def net_reset() -> Connect4Net:
+        return net
     
-    @torch.jit.script
-    def net_infer(board: Board, context: torch.Tensor, player: PlayerId) -> Move:
-        return net_infer_move(net, board, player)
+    def net_infer(board: Board, net: Connect4Net, player: PlayerId) -> Move:
+        return net.net_infer_move(board, player)
 
     return net_infer, net_reset, "net"
 
@@ -372,7 +368,7 @@ def faceoff_loop(p1: PlayerTuple, p2: PlayerTuple) -> None:
     else:
         print("Stalemate!")
 
-def train_self_play(net: nn.Module, optimizer: torch.optim.Optimizer, num_games: int = 1000):
+def train_self_play(net: Connect4Net, optimizer: torch.optim.Optimizer, num_games: int = 1000):
     """
     Train the network using self-play.
     For each game, we record:
@@ -400,7 +396,7 @@ def train_self_play(net: nn.Module, optimizer: torch.optim.Optimizer, num_games:
             
             done = False
             while not done:
-                action, log_prob = net_infer_log_prob(net, board, current_player)
+                action, log_prob = net.net_infer_log_prob(board, current_player)
                 
                 # Record the log probability and the current player.
                 log_probs.append(log_prob)
@@ -441,7 +437,7 @@ def train_self_play(net: nn.Module, optimizer: torch.optim.Optimizer, num_games:
             
             # Compute the policy loss.
             scale = 10000 # TODO maybe remove
-            loss: torch.Tensor = torch.tensor(0.0) # TODO did i break anything, was 0.0
+            loss: torch.Tensor = torch.tensor([0.0])
             base_discount = 0.98
             discount = 1.0
             assert(len(log_probs) == len(returns))
@@ -464,7 +460,7 @@ def train_self_play(net: nn.Module, optimizer: torch.optim.Optimizer, num_games:
                 })
 
 
-def train_vs_player(net: nn.Module, optimizer: torch.optim.Optimizer, player: PlayerTuple, num_games: int = 1000):
+def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: PlayerTuple, num_games: int = 1000):
     """
     Here we let the network play as Player 1 against a random opponent (Player 2).
     Only the moves from the neural network player are used for the policy update.
@@ -483,7 +479,7 @@ def train_vs_player(net: nn.Module, optimizer: torch.optim.Optimizer, player: Pl
             p2_ctx = p2_reset()
             while not done:
                 if current_player == 1:
-                    action, log_prob = net_infer_log_prob(net, board, current_player)
+                    action, log_prob = net.net_infer_log_prob(board, current_player)
                     log_probs.append(log_prob)
                     board = make_move(board, action, current_player)
                 else:
@@ -531,7 +527,7 @@ def train_vs_player(net: nn.Module, optimizer: torch.optim.Optimizer, player: Pl
                     "Win%": f"{net_wins/(game+1):3.0%}",
                 })
 
-def train_supervised_vs_functions(net: nn.Module, 
+def train_supervised_vs_functions(net: Connect4Net, 
                                   optimizer: torch.optim.Optimizer, 
                                   trainer: PlayerTuple,
                                   opponent: PlayerTuple,
@@ -583,7 +579,7 @@ def train_supervised_vs_functions(net: nn.Module,
                     # Get the trainer's move.
                     trainer_action = t_move(board, t_ctx, current_player)
                     # TODO XXX
-                    net_action_tensor, dist, masked_logits = net_infer_logits(net, board, current_player)
+                    net_action_tensor, selected_prob, dist, masked_logits = net.net_infer_logits(board, current_player)
                     net_action = int(net_action_tensor)
 
                     if net_action == trainer_action:
