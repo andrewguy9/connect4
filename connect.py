@@ -1,4 +1,4 @@
-from typing import Callable, List, Literal, Tuple
+from typing import Callable, List, Literal, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
@@ -156,138 +156,9 @@ def pretty_print_board(board: torch.Tensor) -> None:
     for row in board_list:
         print(" ".join(symbol_map[cell] for cell in row))
 
-###########
-# PLAYERS #
-###########
-
-Context = torch.Tensor
-PlayerName = Literal["random", "rank", "greedy", "net"]
-MoveFn = Callable[[Board, Context, PlayerId], Move]
-ResetFn = Callable[[], Context]
-PlayerTuple = Tuple[MoveFn, ResetFn, PlayerName]
-PlayerFn = Callable[[], PlayerTuple]
-
-def make_random_player() -> PlayerTuple:
-    @torch.jit.script
-    def reset_random_player():
-        return torch.zeros(0) # TODO device noop
-    
-    @torch.jit.script
-    def random_player_move(board: Board, ctx: Context, player: int = 1) -> Move:
-        # Create a random policy vector of size (7,) with values in [0, 1).
-        policy = torch.rand((7,)).to(board.device)
-        col = best_move(policy, board)
-        return col
-
-    return random_player_move, reset_random_player, "random"
-
-def make_random_ranked_player() -> PlayerTuple:
-    # @torch.jit.script
-    def reset_rand_ranked_player() -> Context:
-        # Generate a random permutation of columns (0 to 6)
-        random_order = torch.zeros(0) # TODO device noop
-        return random_order
-
-    # @torch.jit.script
-    def rank_player_move(board: torch.Tensor, ctx: torch.Tensor, player: int = 1) -> int:
-        rows = board.size(0)
-        cols = board.size(1)
-        
-        # TODO i would think the priority would fix this.
-        # Create a priority tensor for each column; set full columns to -infinity.
-        pri = torch.full((cols,), float('-inf'))
-        
-        # Iterate over columns.
-        for col in range(cols):
-            # Assume board is a 2D tensor and column_height returns the landing row for a column.
-            r = column_height(board, col)
-            tokens = board[r+1:, col]  # Slice of tokens below the landing row
-
-            # Count our tokens (p)
-            is_player = (tokens == player).to(torch.int)
-            p = int(torch.sum(torch.cumprod(is_player, dim=0)).item())
-
-            # Count opponent tokens (o)
-            is_opponent = (tokens == -player).to(torch.int)
-            o = int(torch.sum(torch.cumprod(is_opponent, dim=0)).item())
-        
-            s = r + 1
-            moves_to_win = 4 - p
-            moves_to_lose = 4 - o
-            pri_win = 1/moves_to_win # 1, 0.5 0.33, 0.25
-            can_win = s >= moves_to_win
-            pri_block = 1/(moves_to_lose + .1) # 0.9 0.47 0.32 0.24
-            can_lose = s >= moves_to_lose
-            col_pri = pri_win if can_win else 0.0 + pri_block if can_lose else 0.0 + float('-inf') if s == 0 else 0.0
-            pri[col] = col_pri
-
-        # Find the maximum priority.
-        mask = (pri == pri.max())
-        filtered = torch.where(mask, pri, torch.tensor(float('-inf')))
-        probs = torch.softmax(filtered, dim=0)
-        chosen_idx = int(torch.multinomial(probs, 1).item())
-        return chosen_idx
-
-    return rank_player_move, reset_rand_ranked_player, "rank"
-
-@torch.jit.script
-def playerWinningMoves(board:Board, player: PlayerId) -> torch.Tensor:
-    cols = board.size(1)
-    mask = torch.zeros(cols, device=board.device)
-    for col in range(cols):
-        if board[0, col] == 0:
-            board_after = make_move(board, col, player)
-            if check_win(board_after, player):
-                mask[col]=1
-    return mask
-
-@torch.jit.script
-def OpponentHasWinningMove(board: Board, player: PlayerId) -> torch.Tensor:
-    return playerWinningMoves(board, -player)
-
-def make_greedy_player():
-    @torch.jit.script
-    def reset_greedy_player() -> torch.Tensor:
-        # This player does not need per-game context, so we return an empty tensor.
-        return torch.zeros(0) # TODO device noop
-    
-    @torch.jit.script
-    def greedy_player_move(board: torch.Tensor, ctx: torch.Tensor, player: int = 1) -> Move:
-        # 1. Check for an immediate winning move.
-        for col in range(7):
-            if board[0, col] == 0:
-                board_after = make_move(board, col, player)
-                if check_win(board_after, player):
-                    return col
-
-        # 2. Block the opponent's immediate winning move.
-        opponent = -player
-        for col in range(7):
-            if board[0, col] == 0:
-                board_after = make_move(board, col, opponent)
-                if check_win(board_after, opponent):
-                    return col
-
-        # Phase 3: Evaluate moves based on connectivity using tensors.
-        # Initialize connectivity scores with -infinity for invalid moves.
-        connectivity_scores = torch.full((7,), float('-inf'))
-        valid_mask = valid_move_mask(board)   
-        # Compute connectivity scores for each valid column.
-        for col in range(7):
-            if valid_mask[col]:
-                simulated_board = make_move(board, col, player)
-                # Since the move is valid, column_height(board, col) should always return a valid row.
-                score = connectivity_score(simulated_board, column_height(board, col), col, player)
-                connectivity_scores[col] = score
-
-        # Probabilistic move selection using softmax and multinomial sampling.
-        probs = torch.softmax(connectivity_scores, dim=0)
-        selected_move = int(torch.multinomial(probs, 1).item())
-        return selected_move
-    
-    return greedy_player_move, reset_greedy_player, "greedy"
-
-
+#########
+# Model #
+#########
 class Connect4Net(nn.Module):
     def __init__(self):
         super(Connect4Net, self).__init__()
@@ -360,19 +231,154 @@ class Connect4Net(nn.Module):
         action_tensor, _ = self.net_infer_log_prob(board, player)
         return int(action_tensor)
 
-# TODO use?
-scripted_net = torch.jit.script(Connect4Net())
+#########
+# TYPES #
+#########
+
+Context = torch.Tensor
+Model = Union[Connect4Net, torch.jit.RecursiveScriptModule]
+PlayerName = Literal["random", "rank", "greedy", "net"]
+MoveFn = Callable[[Board, Context, PlayerId], Move]
+ResetFn = Callable[[], Context]
+PlayerTuple = Tuple[MoveFn, ResetFn, PlayerName, Optional[Model]]
+PlayerFn = Callable[[], PlayerTuple]
 
 # TODO i bet this will not be passable into script, because it relies on a shared scope.
-def make_net_player(net: Connect4Net) -> PlayerTuple:
+def make_net_player(net: Model) -> PlayerTuple:
 
-    def net_reset() -> Connect4Net:
-        return net
+    def net_reset() -> Context:
+        return torch.Tensor(0) # TODO device noop
     
-    def net_infer(board: Board, net: Connect4Net, player: PlayerId) -> Move:
+    def net_infer(board: Board, ctx: Context, player: PlayerId) -> Move:
+        # TODO make net a param.
         return net.net_infer_move(board, player)
 
-    return net_infer, net_reset, "net"
+    return net_infer, net_reset, "net", net
+
+###########
+# PLAYERS #
+###########
+
+def make_random_player() -> PlayerTuple:
+    @torch.jit.script
+    def reset_random_player():
+        return torch.zeros(0) # TODO device noop
+    
+    @torch.jit.script
+    def random_player_move(board: Board, ctx: Context, player: int = 1) -> Move:
+        # Create a random policy vector of size (7,) with values in [0, 1).
+        policy = torch.rand((7,)).to(board.device)
+        col = best_move(policy, board)
+        return col
+
+    return random_player_move, reset_random_player, "random", None
+
+def make_random_ranked_player() -> PlayerTuple:
+    # @torch.jit.script
+    def reset_rand_ranked_player() -> Context:
+        # Generate a random permutation of columns (0 to 6)
+        random_order = torch.zeros(0) # TODO device noop
+        return random_order
+
+    # @torch.jit.script
+    def rank_player_move(board: torch.Tensor, ctx: torch.Tensor, player: int = 1) -> int:
+        rows = board.size(0)
+        cols = board.size(1)
+        
+        # TODO i would think the priority would fix this.
+        # Create a priority tensor for each column; set full columns to -infinity.
+        pri = torch.full((cols,), float('-inf'))
+        
+        # Iterate over columns.
+        for col in range(cols):
+            # Assume board is a 2D tensor and column_height returns the landing row for a column.
+            r = column_height(board, col)
+            tokens = board[r+1:, col]  # Slice of tokens below the landing row
+
+            # Count our tokens (p)
+            is_player = (tokens == player).to(torch.int)
+            p = int(torch.sum(torch.cumprod(is_player, dim=0)).item())
+
+            # Count opponent tokens (o)
+            is_opponent = (tokens == -player).to(torch.int)
+            o = int(torch.sum(torch.cumprod(is_opponent, dim=0)).item())
+        
+            s = r + 1
+            moves_to_win = 4 - p
+            moves_to_lose = 4 - o
+            pri_win = 1/moves_to_win # 1, 0.5 0.33, 0.25
+            can_win = s >= moves_to_win
+            pri_block = 1/(moves_to_lose + .1) # 0.9 0.47 0.32 0.24
+            can_lose = s >= moves_to_lose
+            col_pri = pri_win if can_win else 0.0 + pri_block if can_lose else 0.0 + float('-inf') if s == 0 else 0.0
+            pri[col] = col_pri
+
+        # Find the maximum priority.
+        mask = (pri == pri.max())
+        filtered = torch.where(mask, pri, torch.tensor(float('-inf')))
+        probs = torch.softmax(filtered, dim=0)
+        chosen_idx = int(torch.multinomial(probs, 1).item())
+        return chosen_idx
+
+    return rank_player_move, reset_rand_ranked_player, "rank", None
+
+@torch.jit.script
+def playerWinningMoves(board:Board, player: PlayerId) -> torch.Tensor:
+    cols = board.size(1)
+    mask = torch.zeros(cols, device=board.device)
+    for col in range(cols):
+        if board[0, col] == 0:
+            board_after = make_move(board, col, player)
+            if check_win(board_after, player):
+                mask[col]=1
+    return mask
+
+@torch.jit.script
+def OpponentHasWinningMove(board: Board, player: PlayerId) -> torch.Tensor:
+    return playerWinningMoves(board, -player)
+
+def make_greedy_player()-> PlayerTuple:
+    @torch.jit.script
+    def reset_greedy_player() -> torch.Tensor:
+        # This player does not need per-game context, so we return an empty tensor.
+        return torch.zeros(0) # TODO device noop
+    
+    @torch.jit.script
+    def greedy_player_move(board: torch.Tensor, ctx: torch.Tensor, player: int = 1) -> Move:
+        # 1. Check for an immediate winning move.
+        for col in range(7):
+            if board[0, col] == 0:
+                board_after = make_move(board, col, player)
+                if check_win(board_after, player):
+                    return col
+
+        # 2. Block the opponent's immediate winning move.
+        opponent = -player
+        for col in range(7):
+            if board[0, col] == 0:
+                board_after = make_move(board, col, opponent)
+                if check_win(board_after, opponent):
+                    return col
+
+        # Phase 3: Evaluate moves based on connectivity using tensors.
+        # Initialize connectivity scores with -infinity for invalid moves.
+        connectivity_scores = torch.full((7,), float('-inf'))
+        valid_mask = valid_move_mask(board)   
+        # Compute connectivity scores for each valid column.
+        for col in range(7):
+            if valid_mask[col]:
+                simulated_board = make_move(board, col, player)
+                # Since the move is valid, column_height(board, col) should always return a valid row.
+                score = connectivity_score(simulated_board, column_height(board, col), col, player)
+                connectivity_scores[col] = score
+
+        # Probabilistic move selection using softmax and multinomial sampling.
+        probs = torch.softmax(connectivity_scores, dim=0)
+        selected_move = int(torch.multinomial(probs, 1).item())
+        return selected_move
+    
+    return greedy_player_move, reset_greedy_player, "greedy", None
+
 
 ##########
 # Loops # 
@@ -384,9 +390,9 @@ def faceoff_loop(p1: PlayerTuple, p2: PlayerTuple) -> None:
     board = torch.zeros((6, 7), dtype=torch.int8).to(device)
     # Create the neural network (Player 1). It is untrained.
     
-    p1_move, p1_reset, p1_name = p1
+    p1_move, p1_reset, p1_name, p1_net = p1
     p1_ctx = p1_reset()
-    p2_move, p2_reset, p2_name = p2
+    p2_move, p2_reset, p2_name, p2_net = p2
     p2_ctx = p2_reset()
 
     current_player: PlayerId = 1
@@ -425,7 +431,7 @@ def faceoff_loop(p1: PlayerTuple, p2: PlayerTuple) -> None:
     else:
         print("Stalemate!")
 
-def train_self_play(net: Connect4Net, optimizer: torch.optim.Optimizer, num_games: int = 1000):
+def train_self_play(net: Model, optimizer: torch.optim.Optimizer, num_games: int = 1000):
     """
     Train the network using self-play.
     For each game, we record:
@@ -538,13 +544,13 @@ def train_self_play(net: Connect4Net, optimizer: torch.optim.Optimizer, num_game
         
 
 
-def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: PlayerTuple, num_games: int = 1000):
+def train_vs_player(net: Model, optimizer: torch.optim.Optimizer, player: PlayerTuple, num_games: int = 1000):
     """
     Here we let the network play as Player 1 against a random opponent (Player 2).
     Only the moves from the neural network player are used for the policy update.
     """
     global device
-    p2_move, p2_reset, p2_name = player
+    p2_move, p2_reset, p2_name, p_net = player
     net.train()
     net_wins = 0
     total_loss = 0.0
@@ -614,7 +620,7 @@ def train_vs_player(net: Connect4Net, optimizer: torch.optim.Optimizer, player: 
     wins_str = f"{net_wins/num_games:.2%}"
     pbar.write(f"Average loss per game: {avg_loss_str} Overall winrate vs {p2_name}: {wins_str}")
 
-def train_supervised_vs_functions(net: Connect4Net, 
+def train_supervised_vs_functions(net: Model, 
                                   optimizer: torch.optim.Optimizer, 
                                   trainer: PlayerTuple,
                                   opponent: PlayerTuple,
@@ -646,8 +652,8 @@ def train_supervised_vs_functions(net: Connect4Net,
     correct_moves = 0
     total_moves = 0
 
-    t_move, t_reset, t_name = trainer
-    o_move, o_reset, o_name = opponent
+    t_move, t_reset, t_name, t_net = trainer
+    o_move, o_reset, o_name, o_net = opponent
 
     epoch_loss = torch.tensor(0.0, requires_grad=True)
 
@@ -726,8 +732,8 @@ def evaluate_player_vs_player(player1: PlayerTuple, player2: PlayerTuple, num_ga
     Evaluate the neural network (as Player 1) against a random player (as Player 2)
     over num_games. Returns a tuple of (net wins, random wins, stalemates).
     """
-    p1_mov, p1_reset, p1_name = player1
-    p2_mov, p2_reset, p2_name = player2
+    p1_mov, p1_reset, p1_name, p1_net = player1
+    p2_mov, p2_reset, p2_name, p2_net = player2
     p1_wins = 0
     p2_wins = 0
     stalemates = 0
