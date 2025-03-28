@@ -159,6 +159,7 @@ def pretty_print_board(board: torch.Tensor) -> None:
 #########
 # Model #
 #########
+
 class Connect4Net(nn.Module):
     def __init__(self):
         super(Connect4Net, self).__init__()
@@ -236,9 +237,9 @@ class Connect4Net(nn.Module):
 #########
 
 Context = torch.Tensor
-Model = Union[Connect4Net, torch.jit.RecursiveScriptModule]
+Model = torch.jit.RecursiveScriptModule # Could also have Connect4Net, if you dont want jit'ed model.
 PlayerName = Literal["random", "rank", "greedy", "net"]
-MoveFn = Callable[[Board, Context, PlayerId], Move]
+MoveFn = Callable[[Board, Context, Optional[Model], PlayerId], Move]
 ResetFn = Callable[[], Context]
 PlayerTuple = Tuple[MoveFn, ResetFn, PlayerName, Optional[Model]]
 PlayerFn = Callable[[], PlayerTuple]
@@ -249,8 +250,9 @@ def make_net_player(net: Model) -> PlayerTuple:
     def net_reset() -> Context:
         return torch.Tensor(0) # TODO device noop
     
-    def net_infer(board: Board, ctx: Context, player: PlayerId) -> Move:
-        # TODO make net a param.
+    def net_infer(board: Board, ctx: Context, net: Optional[Model], player: PlayerId) -> Move:
+        if net is None:
+            raise ValueError("Model is required.")
         return net.net_infer_move(board, player)
 
     return net_infer, net_reset, "net", net
@@ -265,7 +267,7 @@ def make_random_player() -> PlayerTuple:
         return torch.zeros(0) # TODO device noop
     
     @torch.jit.script
-    def random_player_move(board: Board, ctx: Context, player: int = 1) -> Move:
+    def random_player_move(board: Board, ctx: Context, net: None, player: int = 1) -> Move:
         # Create a random policy vector of size (7,) with values in [0, 1).
         policy = torch.rand((7,)).to(board.device)
         col = best_move(policy, board)
@@ -281,7 +283,7 @@ def make_random_ranked_player() -> PlayerTuple:
         return random_order
 
     # @torch.jit.script
-    def rank_player_move(board: torch.Tensor, ctx: torch.Tensor, player: int = 1) -> int:
+    def rank_player_move(board: torch.Tensor, ctx: torch.Tensor, net: Optional[Model], player: int = 1) -> int:
         rows = board.size(0)
         cols = board.size(1)
         
@@ -344,7 +346,7 @@ def make_greedy_player()-> PlayerTuple:
         return torch.zeros(0) # TODO device noop
     
     @torch.jit.script
-    def greedy_player_move(board: torch.Tensor, ctx: torch.Tensor, player: int = 1) -> Move:
+    def greedy_player_move(board: torch.Tensor, ctx: torch.Tensor, net: None, player: int = 1) -> Move:
         # 1. Check for an immediate winning move.
         for col in range(7):
             if board[0, col] == 0:
@@ -407,11 +409,11 @@ def faceoff_loop(p1: PlayerTuple, p2: PlayerTuple) -> None:
             break
         
         if current_player == 1:
-            move = p1_move(board, p1_ctx, current_player)
+            move = p1_move(board, p1_ctx, p1_net, current_player)
             # TODO this could be a net or a player, but its working! XXX
             board = make_move(board, move, current_player)
         else:
-            move = p2_move(board, p2_ctx, current_player)
+            move = p2_move(board, p2_ctx, p2_net, current_player)
             board = make_move(board, move, current_player)
         
         pretty_print_board(board)
@@ -550,7 +552,7 @@ def train_vs_player(net: Model, optimizer: torch.optim.Optimizer, player: Player
     Only the moves from the neural network player are used for the policy update.
     """
     global device
-    p2_move, p2_reset, p2_name, p_net = player
+    p2_move, p2_reset, p2_name, p2_net = player
     net.train()
     net_wins = 0
     total_loss = 0.0
@@ -571,7 +573,7 @@ def train_vs_player(net: Model, optimizer: torch.optim.Optimizer, player: Player
                 board = make_move(board, action, current_player)
             else:
                 # Algoritm player move
-                move = p2_move(board, p2_ctx, current_player)
+                move = p2_move(board, p2_ctx, p2_net, current_player)
                 board = make_move(board, move, current_player)
             
             # Check terminal conditions.
@@ -669,7 +671,7 @@ def train_supervised_vs_functions(net: Model,
         while True:
             if current_player == 1:
                 # Get the trainer's move.
-                trainer_action = t_move(board, t_ctx, current_player)
+                trainer_action = t_move(board, t_ctx, t_net, current_player)
                 # TODO XXX
                 net_action_tensor, selected_prob, dist, masked_logits = net.net_infer_logits(board, current_player)
                 net_action = int(net_action_tensor)
@@ -687,7 +689,7 @@ def train_supervised_vs_functions(net: Model,
                 # Update the board using the trainer's move.
                 board = make_move(board, trainer_action, current_player)
             else:
-                opponent_action = o_move(board, o_ctx, current_player)
+                opponent_action = o_move(board, o_ctx, o_net, current_player)
                 board = make_move(board, opponent_action, current_player)
             
             # Check for terminal conditions.
@@ -748,10 +750,10 @@ def evaluate_player_vs_player(player1: PlayerTuple, player2: PlayerTuple, num_ga
                     stalemates += 1
                     break
                 if current_player == 1:
-                    move: Move = p1_mov(board, p1_ctx, current_player)
+                    move: Move = p1_mov(board, p1_ctx, p1_net, current_player)
                     board = make_move(board, move, current_player)
                 else:
-                    move = p2_mov(board, p2_ctx, current_player)
+                    move = p2_mov(board, p2_ctx, p2_net, current_player)
                     board = make_move(board, move, current_player)
                     # board = random_player_move(board, player=current_player)
                 if check_win(board, current_player):
