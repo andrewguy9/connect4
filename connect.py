@@ -759,22 +759,23 @@ def evaluate_player_vs_player(player1: PlayerTuple, player2: PlayerTuple, num_ga
 
 def evaluation_main() -> None:
     net = Connect4Net()
-    net.to(device)
-    optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
+    snet = torch.jit.script(net)
+    snet.to(device)
+    optimizer = torch.optim.Adam(snet.parameters(), lr=1e-2)
 
-    n_eval = 1000
-    epochs_supervised = 200
-    epochs_reinforcement=500
+    n_eval = 10#00
+    epochs_supervised = 20#0
+    epochs_reinforcement=50#0
     n_train_supervised = 1000
-    n_train_reinforce = 100
-    n_train_self = 1000
+    n_train_reinforce = 10#0
+    n_train_self = 10#00
 
-    net_player = make_net_player(net)
+    net_player = make_net_player(snet)
 
-    faceoffs = True
+    faceoffs = False
     supervised = True
-    reinforcement = True
-    selfplay = True
+    reinforcement = False
+    selfplay = False
 
     r_player = make_random_player()
     rr_player = make_random_ranked_player()
