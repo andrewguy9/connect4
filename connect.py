@@ -704,6 +704,7 @@ def train_supervised_vs_functions(net: Connect4Net,
         else:
             game_loss = torch.tensor(0.0)
 
+        # TODO do this as average loss, and you can re-enable.
         """
         pbar.set_postfix({
             "loss": f"{game_loss.item():.4f}" if T > 0 else "N/A",
@@ -793,7 +794,7 @@ def evaluation_main() -> None:
         faceoff_loop(greed_player, r_player)
 
         print("-" * 80)
-        net.eval()
+        snet.eval()
         print("Demo: Neural Network")
         faceoff_loop(net_player, r_player)
 
@@ -801,13 +802,13 @@ def evaluation_main() -> None:
     if supervised:
         for opponent in tqdm([r_player, rr_player, greed_player], desc="PvP"):
             for epoch in (pbar:=tqdm(range(epochs_supervised), desc="Supervised", leave=False)):
-                train_supervised_vs_functions(net, optimizer, greed_player, opponent, num_games=n_train_supervised)
+                train_supervised_vs_functions(snet, optimizer, greed_player, opponent, num_games=n_train_supervised)
 
     # REINFORCEMENT TRAINING
     if reinforcement:
         for opponent in tqdm([r_player, rr_player, greed_player], desc="PvP"):
             for epoch in (pbar:=tqdm(range(epochs_reinforcement), desc="Reinforcement")):
-                train_vs_player(net, optimizer, opponent, num_games=n_train_reinforce)
+                train_vs_player(snet, optimizer, opponent, num_games=n_train_reinforce)
 
                 if epoch % (epochs_reinforcement/20) == 0:
                     p1_wins, p2_wins, draws = evaluate_player_vs_player(net_player, r_player, num_games=n_eval)
@@ -815,32 +816,33 @@ def evaluation_main() -> None:
                         f"EVALUATING NET VS {opponent[2]}:f{epoch} : {p1_wins}/{p2_wins}/{draws} = {100*p1_wins/n_eval:3.0f}%")
     if selfplay:
         for epoch in (pbar:=tqdm(range(epochs_reinforcement), desc="Selfplay")):
-            train_self_play(net, optimizer, num_games=n_train_self)
+            train_self_play(snet, optimizer, num_games=n_train_self)
 
-    torch.save(net.state_dict(), f"connect4_net_final.pth")
+    torch.save(snet.state_dict(), f"connect4_net_final.pth")
 
     # Faceoffs
     if faceoffs:
         print("-" * 80)
-        net_player = make_net_player(net)
+        net_player = make_net_player(snet)
         print("Demo: Neural Network after training vs random player")
         faceoff_loop(net_player, r_player)
 
-        net_player = make_net_player(net)
+        net_player = make_net_player(snet)
         print("Demo: Neural Network after training vs random ranked player")
         faceoff_loop(net_player, rr_player)
 
-        net_player = make_net_player(net)
+        net_player = make_net_player(snet)
         print("Demo: Neural Network after training vs greedy player")
         faceoff_loop(net_player, greed_player)
 
-        net_player = make_net_player(net)
+        net_player = make_net_player(snet)
         print("Demo: Neural Network after training self-play")
         faceoff_loop(net_player, net_player)
 
         untrained_net = Connect4Net()
-        untrained_net.to(device)
-        untrained_net_player = make_net_player(untrained_net)
+        untrained_snet = torch.jit.script(untrained_net)
+        untrained_snet.to(device)
+        untrained_net_player = make_net_player(untrained_snet)
         print("Demo: Neural Network vs Untrained Neural Network")
         faceoff_loop(net_player, untrained_net_player)
 
